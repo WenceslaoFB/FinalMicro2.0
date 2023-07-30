@@ -1,0 +1,12 @@
+main.c:83:6:HAL_UART_RxCpltCallback	1
+main.c:89:6:HAL_TIM_PeriodElapsedCallback	1
+main.c:94:6:uart	2
+main.c:101:6:mensaje	1
+main.c:106:6:recibirmensaje	3
+main.c:124:5:main	4
+main.c:185:6:SystemClock_Config	3
+main.c:232:13:MX_TIM4_Init	4
+main.c:277:13:MX_USART1_UART_Init	2
+main.c:310:13:MX_USART2_UART_Init	2
+main.c:343:13:MX_GPIO_Init	1
+main.c:383:6:Error_Handler	1
