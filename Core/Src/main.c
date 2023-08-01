@@ -74,6 +74,9 @@ typedef union{
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+ADC_HandleTypeDef hadc1;
+DMA_HandleTypeDef hdma_adc1;
+
 TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim4;
 
@@ -85,12 +88,14 @@ const char AT_com[]="AT\r\n";//4
 const char AT_ans[]="AT\r\n\r\nOK\r\n";//10
 
 const char CWQAP[]="AT+CWQAP\r\n";//10
-const char ANS_CWQAP[]={"AT+CWQAP\r\n\r\nOK\r\nWIFI DISCONNECT/r/n"};//35
+const char ANS_CWQAP[]={"AT+CWQAP\r\n\r\nOK\r\n"};//16
+const char ANS_CWQAP2[]={"AT+CWQAP\r\n\r\nOK\r\nWIFI DISCONNECT/r/n"};//35
 
 const char CWMODE[]="AT+CWMODE=3\r\n";//13
 const char ANS_CWMODE[]="AT+CWMODE=3\r\n\r\nOK\r\n";//19
 
 const char CWJAP_casa[]="AT+CWJAP=\"FTTHBOUVET\",\"wenvla3112\"\r\n";//36
+const char ANS_CWJAP_casa2[]="AT+CWJAP=\"FTTHBOUVET\",\"wenvla3112\"\r\n";//36
 const char ANS_CWJAP_casa[]="AT+CWJAP=\"FTTHBOUVET\",\"wenvla3112\"\r\nWIFI CONNECTED\r\nWIFI GOT IP\r\n\r\nOK\r\n";//71
 
 const char CIFSR[]="AT+CIFSR\r\n";//10
@@ -100,7 +105,8 @@ const char CIPMUX[]="AT+CIPMUX=0\r\n";//13
 const char ANS_CIPMUX[]="AT+CIPMUX=0\r\n\r\nOK\r\n";//19
 
 const char CIPSTART[]="AT+CIPSTART=\"UDP\",\"192.168.1.195\",30017,3017\r\n";//46
-const char ANS_CIPSTART[]="AT+CIPSTART=\"UDP\",\"192.168.1.195\",30017,3017\r\nCONNECT\r\n\r\nOK\r\n";//61
+const char ANS_CIPSTART2[]="AT+CIPSTART=\"UDP\",\"192.168.1.195\",30017,3017\r\nCONNECT\r\n\r\nOK\r\n";//61
+const char ANS_CIPSTART[]="AT+CIPSTART=\"UDP\",\"192.168.1.195\",30017,3017\r\n";//46
 const char ANS_CIPSTART_ERROR[]="AT+CIPSTART=\"UDP\",\"192.168.1.195\",30017,3017\r\nALREADY CONNECTED\r\n\r\nERROR\r\n";//74
 const char AUTOMATIC_WIFI_CONNECTED[]={"WIFI CONNECTED\r\nWIFI GOT IP\r\n"};//29
 const char WIFI_DISCONNECT[]="WIFI DISCONNECT\r\n";//17
@@ -120,6 +126,7 @@ const int COORD_SENSORES[]={-5,-4,-3,-2,-1,1,2,3,4,5};
 
 volatile uint8_t buf_rx[256];
 volatile uint8_t buf_tx[256];
+volatile uint8_t ADCData[32][8];
 
 char espIP[15];
 
@@ -130,12 +137,13 @@ volatile uint8_t indRX_W=0;
 volatile uint8_t indRX_R=0;
 volatile uint8_t indTX_W=0;
 volatile uint8_t indTX_R=0;
+volatile uint8_t indADC=0;
 
 uint8_t coincidencias = 0, coincidencias2 = 0, duty = 0, AT=0, decoCIPSEND=0, decodeCIF=0, decoIPD=0;
-uint8_t timeout1=0, timeout2=0;
+uint8_t timeout1=0, timeout2=0, timeoutADC=0, timeoutPID=0;
 uint8_t largoIP=0, bytesToSend=0, bytesToSend_aux=0, timeToSendAlive=0;
 uint8_t cks, bytesUNERprotocol, contByte=1, cmdPosInBuf;
-uint8_t comandoActual=0;
+uint8_t comandoActual=0, primLectADC=1;
 uint8_t firstCalcu=1,timeOutArranque;
 
 _sWork PWM_motor1,PWM_motor2,jobTime,error;
@@ -151,18 +159,24 @@ float integral=0,derivativo=0,turn=0,Error=0,lastError=0;
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_TIM4_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_TIM3_Init(void);
+static void MX_ADC1_Init(void);
 /* USER CODE BEGIN PFP */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart);
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim);
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc);
 void initEsp();
 void uart();
 void recibirmensaje();
 void udpCom(uint8_t cmd);
 void DecodeComands(uint8_t *buffer,uint8_t indexCMD);
+void leerADC();
+float findLine();
+void calcPID(uint32_t pwmBase1,uint32_t pwmBase2);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -189,6 +203,14 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
 				ON10MS = 1;
 			}
 		}
+}
+
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc){
+
+	indADC++;
+	if(indADC==32){
+		indADC=0;
+	}
 }
 
 void uart(){
@@ -223,7 +245,7 @@ void initEsp(){
 			case 3:
 				memcpy((uint8_t*)&buf_tx[indTX_W],CWJAP_casa,36);
 				indTX_W+=36;
-				timeout2 = 30;
+				timeout2 = 50;
 				readyToSend = 0;
 			break;
 			case 4:
@@ -241,7 +263,7 @@ void initEsp(){
 			case 6:
 				memcpy((uint8_t*)&buf_tx[indTX_W],CIPSTART,46);
 				indTX_W+=46;
-				timeout2 = 30;
+				timeout2 = 20;
 				readyToSend = 0;
 			break;
 			case 7:
@@ -279,7 +301,7 @@ void recibirmensaje(){
 			if(buf_rx[indRX_R]==ANS_CWQAP[coincidencias]){
 				coincidencias++;
 
-				if(coincidencias>30){
+				if(coincidencias>14){
 					//HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
 					coincidencias = 0;
 					AT++;
@@ -430,14 +452,15 @@ void recibirmensaje(){
 			if(buf_rx[indRX_R]==ANS_CIPSTART[coincidencias]){
 				coincidencias++;
 
-				if(coincidencias>59){
+				if(coincidencias>44){
 					coincidencias = 0;
 					coincidencias2 = 0;
-					AT++;
+					AT=8;
 					readyToSend = 1;
 					espConnected=1;
+					HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
 				}
-			}
+			}/*
 				if(buf_rx[indRX_R]==ANS_CIPSTART_ERROR[coincidencias2]){
 					coincidencias2++;
 
@@ -448,14 +471,14 @@ void recibirmensaje(){
 						readyToSend = 1;
 						espConnected=1;
 					}
-				}/*else{
+				}*/else{
 					if(!timeout2){
 						indRX_R=indRX_W;
 						coincidencias = 0;
 						readyToSend=1;
 						break;
 					}
-				}*/
+				}
 
 		break;
 		case 7:
@@ -508,7 +531,7 @@ void recibirmensaje(){
 							decoCIPSEND++;
 							//AT++;
 							readyToSend = 1;
-							espReadyToRecieve=0;
+							espReadyToRecieve=1;
 						}
 					}else{
 						if(!timeout2){
@@ -585,9 +608,10 @@ void recibirmensaje(){
 					if(buf_rx[indRX_R]==CIPSEND4[coincidencias]){
 						coincidencias++;
 
-						if(coincidencias>19){
+						if(coincidencias>17){
 							coincidencias = 0;
 							decoCIPSEND=0;
+							AT=8;
 							readyToSend=1;
 							espReadyToRecieve=0;
 						}
@@ -672,7 +696,7 @@ void recibirmensaje(){
 						contByte++;
 					}else{
 						if(cks==buf_rx[indRX_R]){
-							//DecodeComands((uint8_t*)&buf_rx, cmdPosInBuff);
+							DecodeComands((uint8_t*)&buf_rx, cmdPosInBuf);
 							//HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
 							contByte=1;
 							coincidencias=0;
@@ -792,7 +816,7 @@ void DecodeComands(uint8_t *buffer,uint8_t indexCMD){
 			case 0xF0: //ALIVE
 					duty=2;
 					readyToSend=1;
-					AT=6;
+					//AT=6;
 			break;
 			case 0xD0://JOB TIME
 					PWM_motor1.u8[0]=buffer[indexCMD+i];
@@ -836,6 +860,105 @@ void DecodeComands(uint8_t *buffer,uint8_t indexCMD){
 		}
 }
 
+void leerADC(){
+
+	if(indADC>2){
+		primLectADC=0;
+		for(uint8_t c=0;c<8;c++){
+			valueADC[c].u32=( ADCData[indADC-1][c]+ADCData[indADC-2][c]+ADCData[indADC-3][c] ) / 3 ;
+
+		}
+	}else{
+		if(!primLectADC){
+			for(uint8_t c=0;c<8;c++){
+				switch(indADC){
+					case 2:
+						valueADC[c].u32=(ADCData[1][c]+ADCData[0][c]+ADCData[31][c]) / 3;
+						break;
+					case 1:
+						valueADC[c].u32=( ADCData[0][c]+ADCData[31][c]+ADCData[30][c] ) / 3 ;
+						break;
+					case 0:
+						valueADC[c].u32=( ADCData[31][c]+ADCData[30][c]+ADCData[29][c] ) / 3;
+						break;
+				}
+			}
+		}
+	}
+}
+
+uint8_t posMINCenter=0,posMINRight=0,posMINLeft=0;
+uint16_t sensorValue=0;
+float xMin=0,fx2_fx3,fx2_fx1,x2_x1,x2_x3,x2_x1cuad,x2_x3cuad,denominador;
+uint8_t f=0;
+
+float findLine(){
+
+	float aux[10];
+
+		sensorValue = valueADC[0].u16[0];
+
+
+		posMINCenter=0;
+		while(f<8){					//ENCUENTRO LA MENOR LECTURA
+			if(sensorValue > valueADC[f].u16[0]){
+				sensorValue=valueADC[f].u16[0];
+				posMINCenter=f;
+			}
+			aux[f+1]=valueADC[f].u16[0];
+			f+=1;
+		}
+		f=0;
+		posMINCenter+=1;
+		aux[0]=aux[2];
+		aux[9]=aux[7];
+
+		posMINRight=posMINCenter-1;
+		posMINLeft=posMINCenter+1;
+		fx2_fx3=aux[posMINCenter]-aux[posMINRight];
+		fx2_fx1=aux[posMINCenter]-aux[posMINLeft];
+		x2_x1=COORD_SENSORES[posMINCenter]-COORD_SENSORES[posMINLeft];
+		x2_x1cuad=(x2_x1*x2_x1);
+		x2_x3=COORD_SENSORES[posMINCenter]-COORD_SENSORES[posMINRight];
+		x2_x3cuad=(x2_x3*x2_x3);
+		denominador=(2*(x2_x1*fx2_fx3-x2_x3*fx2_fx1));
+		if(denominador!=0){
+			xMin=COORD_SENSORES[posMINCenter]-( x2_x1cuad*fx2_fx3 - x2_x3cuad*fx2_fx1 ) / denominador;
+		}
+		return -xMin;
+
+}
+
+void calcPID(uint32_t pwmBase1,uint32_t pwmBase2){
+
+	float pwm1,pwm2;
+
+		integral+=error.f;
+
+		if(integral > 1000){
+				integral = 0;
+		}
+
+		derivativo=error.f-lastError;
+		turn= (Kp.u32*error.f) + (Kd.u32*derivativo) + (Ki.u32*integral);
+		pwm1=pwmBase1-turn;
+		pwm2=pwmBase2+turn;
+
+
+
+		if(pwm1>200){
+			pwm1=200;
+		}
+		if(pwm2>200){
+			pwm2=200;
+		}
+
+		__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_1,pwm1);
+		__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_2,0);
+		__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_3,0);
+		__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_4,pwm2);
+		lastError=error.f;
+}
 /* USER CODE END 0 */
 
 /**
@@ -866,13 +989,16 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_USART2_UART_Init();
   MX_TIM4_Init();
   MX_USART1_UART_Init();
   MX_TIM3_Init();
+  MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
   HAL_TIM_Base_Start_IT(&htim4);
   HAL_TIM_Base_Start(&htim3);
+  //HAL_ADC_Start_IT(&hadc1);
 
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
@@ -883,6 +1009,7 @@ int main(void)
   //timeOut3=10;
   timeToSendAlive=30;
   timeout1=30;
+  timeoutADC=0;
   readyToSend=1;
   race=0;
   killRace=0;
@@ -918,6 +1045,13 @@ int main(void)
 	  	 			timeToSendAlive--;
 	  	  }
 
+	  if(ON10MS){
+		  ON10MS=0;
+		  if(timeoutADC>0){
+			  timeoutADC--;
+		  }
+	  }
+
 	  	  if( (!timeToSendAlive) && (espConnected) ){
 	  		  sendALIVE=1;
 	  		  espReadyToRecieve=0;
@@ -926,7 +1060,7 @@ int main(void)
 	  	  }
 
 	  	  if(sendALIVE){
-	  	  		  udpCom(0xF0);
+	  	  	udpCom(0);
 	  	  }
 
 	  	switch(duty){
@@ -942,9 +1076,21 @@ int main(void)
 	  		break;
 	  		case 2:
 	  			//udpCom(0);
-	  			HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
+	  			//HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
 	  		break;
 	  	}
+
+	  	if(!timeoutADC){
+	  		  	leerADC();
+	  		  	error.f=findLine();
+	  		  	timeoutADC=2;
+	  	}
+
+	  	if((race)&&(!timeoutADC)){
+	  		  	calcPID(PWM_motor1.u32,PWM_motor2.u32);
+	  		  	timeoutPID=2;
+	  	}
+
 
 	  		if( ( ( (!jobTime.u32) && (killRace) ) ) || (stop) ) {
 	  				  stop=0;
@@ -1012,6 +1158,121 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief ADC1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_ADC1_Init(void)
+{
+
+  /* USER CODE BEGIN ADC1_Init 0 */
+
+  /* USER CODE END ADC1_Init 0 */
+
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN ADC1_Init 1 */
+
+  /* USER CODE END ADC1_Init 1 */
+
+  /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
+  */
+  hadc1.Instance = ADC1;
+  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
+  hadc1.Init.Resolution = ADC_RESOLUTION_12B;
+  hadc1.Init.ScanConvMode = ENABLE;
+  hadc1.Init.ContinuousConvMode = DISABLE;
+  hadc1.Init.DiscontinuousConvMode = DISABLE;
+  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc1.Init.NbrOfConversion = 8;
+  hadc1.Init.DMAContinuousRequests = ENABLE;
+  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  if (HAL_ADC_Init(&hadc1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_0;
+  sConfig.Rank = 1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_15CYCLES;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_1;
+  sConfig.Rank = 2;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_4;
+  sConfig.Rank = 3;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_8;
+  sConfig.Rank = 4;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_10;
+  sConfig.Rank = 5;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_11;
+  sConfig.Rank = 6;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_12;
+  sConfig.Rank = 7;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_13;
+  sConfig.Rank = 8;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC1_Init 2 */
+
+  /* USER CODE END ADC1_Init 2 */
+
 }
 
 /**
@@ -1193,6 +1454,22 @@ static void MX_USART2_UART_Init(void)
   /* USER CODE BEGIN USART2_Init 2 */
 
   /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA2_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA2_Stream0_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
 
 }
 
