@@ -126,7 +126,7 @@ const int COORD_SENSORES[]={-5,-4,-3,-2,-1,1,2,3,4,5};
 
 volatile uint8_t buf_rx[256];
 volatile uint8_t buf_tx[256];
-volatile uint8_t ADCData[32][8];
+volatile uint16_t ADCData[32][8];
 
 char espIP[15];
 
@@ -147,13 +147,14 @@ uint8_t comandoActual=0, primLectADC=1;
 uint8_t firstCalcu=1,timeOutArranque;
 
 _sWork PWM_motor1,PWM_motor2,jobTime,error;
-_sWork valueADC[8];
+_sWork valueADC[8], valueADCCAL[8];
 _sWork Kp,Kd,Ki;
 _sWork pwmBase;
 
 volatile flag flag1,flag2;
 
 float integral=0,derivativo=0,turn=0,Error=0,lastError=0;
+float  Constante_Relacion[8],proporcional = 0, cuentapid=0, valorsensormax=0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -177,6 +178,8 @@ void DecodeComands(uint8_t *buffer,uint8_t indexCMD);
 void leerADC();
 float findLine();
 void calcPID(uint32_t pwmBase1,uint32_t pwmBase2);
+void calibrarADC();
+void calibrarVal(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -187,10 +190,18 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart){
 	HAL_UART_Receive_IT(&huart1, (uint8_t *) &buf_rx[indRX_W], 1);
 }
 
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc){
+
+	indADC++;
+	if(indADC==32){
+		indADC=0;
+	}
+}
+
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
 
 	if(htim->Instance == TIM4){//ENTRA CADA 10 MS
-			//HAL_ADC_Start_DMA(&hadc1, (uint32_t *)&ADCData[indexADC],8);
+			HAL_ADC_Start_DMA(&hadc1, (uint32_t *)ADCData[indADC],8);
 
 			time100ms--;
 			if(!time100ms){
@@ -203,14 +214,6 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
 				ON10MS = 1;
 			}
 		}
-}
-
-void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc){
-
-	indADC++;
-	if(indADC==32){
-		indADC=0;
-	}
 }
 
 void uart(){
@@ -459,6 +462,7 @@ void recibirmensaje(){
 					readyToSend = 1;
 					espConnected=1;
 					HAL_GPIO_TogglePin(LD2_GPIO_Port, LD2_Pin);
+					sendALIVE=1;
 				}
 			}/*
 				if(buf_rx[indRX_R]==ANS_CIPSTART_ERROR[coincidencias2]){
@@ -636,7 +640,7 @@ void recibirmensaje(){
 					if(buf_rx[indRX_R]==IPD[coincidencias]){
 						coincidencias++;
 
-						if(coincidencias>5){
+						if(coincidencias>4){
 							coincidencias = 0;
 							decoIPD++;
 						}
@@ -689,7 +693,7 @@ void recibirmensaje(){
 				break;
 				case 5:
 					if(contByte==1){
-						cmdPosInBuf=buf_rx[indRX_R];
+						cmdPosInBuf=indRX_R;
 					}
 					if(contByte<bytesUNERprotocol){
 						cks^=buf_rx[indRX_R];
@@ -769,11 +773,18 @@ void DecodeComands(uint8_t *buffer,uint8_t indexCMD){
 	uint8_t i=1;
 
 		switch(buffer[indexCMD]){
-			case 0xB0://STOP AUTITO
-					comandoActual=0xB0;
+			case 0xB3://STOP AUTITO
+					comandoActual=0xB3;
 					stop=1;
 			break;
-			case 0xF1: //START AUTITO
+			case 0xD5: //START AUTITO(asi nomas)
+					PWM_motor2.u32=200;
+					PWM_motor1.u32=200;
+					race=1;
+					timeoutPID=2;
+					calcPID(200,200);
+			break;
+			case 0xF1: //START AUTITO(mandar pwm)
 					PWM_motor1.u8[0]=buffer[indexCMD+i];
 					i++;
 					PWM_motor1.u8[1]=buffer[indexCMD+i];
@@ -784,7 +795,7 @@ void DecodeComands(uint8_t *buffer,uint8_t indexCMD){
 					PWM_motor2.u32=PWM_motor1.u32;
 					comandoActual=0xF1;
 					race=1;
-					//timeOutPID=2;
+					timeoutPID=2;
 			break;
 			case 0xC0:	//SETEAR PARAMETROS CONTROL PID
 					Kp.u8[0]=buffer[indexCMD+i];
@@ -814,9 +825,8 @@ void DecodeComands(uint8_t *buffer,uint8_t indexCMD){
 					comandoActual=0xC0;
 			break;
 			case 0xF0: //ALIVE
-					duty=2;
+					sendALIVE=1;
 					readyToSend=1;
-					//AT=6;
 			break;
 			case 0xD0://JOB TIME
 					PWM_motor1.u8[0]=buffer[indexCMD+i];
@@ -896,16 +906,16 @@ float findLine(){
 
 	float aux[10];
 
-		sensorValue = valueADC[0].u16[0];
+		sensorValue = valueADCCAL[0].u16[0];
 
 
 		posMINCenter=0;
 		while(f<8){					//ENCUENTRO LA MENOR LECTURA
-			if(sensorValue > valueADC[f].u16[0]){
-				sensorValue=valueADC[f].u16[0];
+			if(sensorValue > valueADCCAL[f].u16[0]){
+				sensorValue=valueADCCAL[f].u16[0];
 				posMINCenter=f;
 			}
-			aux[f+1]=valueADC[f].u16[0];
+			aux[f+1]=valueADCCAL[f].u16[0];
 			f+=1;
 		}
 		f=0;
@@ -953,11 +963,34 @@ void calcPID(uint32_t pwmBase1,uint32_t pwmBase2){
 			pwm2=200;
 		}
 
-		__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_1,pwm1);
-		__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_2,0);
-		__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_3,0);
-		__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_4,pwm2);
+		__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_1,0);
+		__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_2,pwm1);
+		__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_3,pwm2);
+		__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_4,0);
 		lastError=error.f;
+}
+
+void calibrarADC(){
+
+	for (uint8_t i = 1; i < 8; i++) {
+			Constante_Relacion[i] = (valueADC[0].f)/(valueADC[i].f);
+			//bufADCCAL[i].f = (bufADC[i].f)*(Constante_Relacion[i]);
+		}
+
+		valorsensormax = valueADC[0].f;
+		for (uint8_t i = 1; i < 8; i++) {
+			if(valorsensormax < (valueADC[i].f * Constante_Relacion[i])){
+				valorsensormax = (valueADC[i].f * Constante_Relacion[i]);
+			}
+		}
+		valorsensormax = valorsensormax * 0.75;
+}
+
+void calibrarVal(void){
+	valueADCCAL[0].f = valueADC[0].f;
+		for(uint8_t i = 1; i<8; i++){
+			valueADCCAL[i].f= (valueADC[i].f)*(Constante_Relacion[i]);
+		}
 }
 /* USER CODE END 0 */
 
@@ -1050,12 +1083,15 @@ int main(void)
 		  if(timeoutADC>0){
 			  timeoutADC--;
 		  }
+		  if(timeoutPID>0){
+		  		timeoutPID--;
+		  }
 	  }
 
 	  	  if( (!timeToSendAlive) && (espConnected) ){
 	  		  sendALIVE=1;
 	  		  espReadyToRecieve=0;
-	  		  timeToSendAlive=30;
+	  		  timeToSendAlive=50;
 	  		  readyToSend=1;
 	  	  }
 
@@ -1191,7 +1227,7 @@ static void MX_ADC1_Init(void)
   hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
   hadc1.Init.NbrOfConversion = 8;
   hadc1.Init.DMAContinuousRequests = ENABLE;
-  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  hadc1.Init.EOCSelection = ADC_EOC_SEQ_CONV;
   if (HAL_ADC_Init(&hadc1) != HAL_OK)
   {
     Error_Handler();
