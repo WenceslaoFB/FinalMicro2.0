@@ -126,6 +126,7 @@ const int COORD_SENSORES[]={-5,-4,-3,-2,-1,1,2,3,4,5};
 
 volatile uint8_t buf_rx[256];
 volatile uint8_t buf_tx[256];
+
 volatile uint16_t ADCData[32][8];
 
 char espIP[15];
@@ -144,7 +145,7 @@ uint8_t timeout1=0, timeout2=0, timeoutADC=0, timeoutPID=0;
 uint8_t largoIP=0, bytesToSend=0, bytesToSend_aux=0, timeToSendAlive=0;
 uint8_t cks, bytesUNERprotocol, contByte=1, cmdPosInBuf;
 uint8_t comandoActual=0, primLectADC=1;
-uint8_t firstCalcu=1,timeOutArranque;
+uint8_t firstCalcu=1,timeOutArranque, calibADC=1,CALIBRADO=0;
 
 _sWork PWM_motor1,PWM_motor2,jobTime,error;
 _sWork valueADC[8], valueADCCAL[8];
@@ -176,7 +177,7 @@ void recibirmensaje();
 void udpCom(uint8_t cmd);
 void DecodeComands(uint8_t *buffer,uint8_t indexCMD);
 void leerADC();
-float findLine();
+void findLine(_sWork *BUFADC);
 void calcPID(uint32_t pwmBase1,uint32_t pwmBase2);
 void calibrarADC();
 void calibrarVal(void);
@@ -192,7 +193,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart){
 
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc){
 
-	indADC++;
+	//indADC++;
 	if(indADC==32){
 		indADC=0;
 	}
@@ -201,7 +202,12 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef* hadc){
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
 
 	if(htim->Instance == TIM4){//ENTRA CADA 10 MS
-			HAL_ADC_Start_DMA(&hadc1, (uint32_t *)ADCData[indADC],8);
+			indADC++;
+			HAL_ADC_Start_DMA(&hadc1, (uint32_t *)&ADCData,8*32);
+
+			if(indADC==32){
+					indADC=0;
+				}
 
 			time100ms--;
 			if(!time100ms){
@@ -217,10 +223,12 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
 }
 
 void uart(){
+
 	if((huart1.Instance->SR & UART_FLAG_TXE)==UART_FLAG_TXE){
 		huart1.Instance->DR=buf_tx[indTX_R];
 		indTX_R++;
 	}
+
 }
 
 void initEsp(){
@@ -764,6 +772,27 @@ void udpCom(uint8_t cmd){
 					duty++;
 				}
 			break;
+			/*case 2:
+				if(!espReadyToRecieve){
+					AT=7;
+					memcpy((uint8_t*)&buf_tx[indTX_W],CIPSEND,11);
+					indTX_W+=11;
+					memcpy((uint8_t*)&buf_tx[indTX_W],"8\r\n",3);
+					indTX_W+=3;
+					bytesToSend=8;
+					timeout2 = 8;
+					readyToSend = 0;
+				}else{
+					memcpy((uint8_t*)&buf_tx[indTX_W],"'U','N','E','R','38',':',0XA1,7);
+					indTX_W+=7;
+
+					buf_tx[indTX_W]='U'^'N'^'E'^'R'^0x09^':'^valueADCCAL[0]^valueADCCAL[1]^valueADCCAL[2]^valueADCCAL[3]^valueADCCAL[4]^valueADCCAL[5]^valueADCCAL[6]^valueADCCAL[7];
+					indTX_W+=1;
+					espReadyToRecieve=0;
+					sendALIVE=0;
+					readyToSend = 0;
+				}
+			break;*/
 		}
 	}
 }
@@ -773,6 +802,9 @@ void DecodeComands(uint8_t *buffer,uint8_t indexCMD){
 	uint8_t i=1;
 
 		switch(buffer[indexCMD]){
+		case 0xA1://Send adc
+				//udpCom(2);
+		break;
 			case 0xB3://STOP AUTITO
 					comandoActual=0xB3;
 					stop=1;
@@ -856,16 +888,20 @@ void DecodeComands(uint8_t *buffer,uint8_t indexCMD){
 					jobTime.u8[3]=buffer[indexCMD+i];
 					i++;
 					jobTime.u32=jobTime.u32/100;
-					__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_1,PWM_motor1.u32);
-					__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_2,0);
-					__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_3,0);
-					__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_4,PWM_motor2.u32);
+					__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_1,0);
+					__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_2,PWM_motor1.u32);
+					__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_3,PWM_motor2.u32);
+					__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_4,0);
 					race=1;
 					killRace=1;
 					duty=2;
 					comandoActual=0xD0;
 					//comando=0xD0;
 					readyToSend=1;
+			break;
+			case 0xA5: //Calibrar ADC
+				calibADC = 1;
+				CALIBRADO =0;
 			break;
 		}
 }
@@ -899,43 +935,49 @@ void leerADC(){
 
 uint8_t posMINCenter=0,posMINRight=0,posMINLeft=0;
 uint16_t sensorValue=0;
-float xMin=0,fx2_fx3,fx2_fx1,x2_x1,x2_x3,x2_x1cuad,x2_x3cuad,denominador;
+float xMin=0,fx2_fx3,fx2_fx1,x2_x1,x2_x3,x2_x1cuad,x2_x3cuad,denominador, numerador, cuenta;
 uint8_t f=0;
 
-float findLine(){
+void findLine(_sWork *BUFADC){
 
 	float aux[10];
 
-		sensorValue = valueADCCAL[0].u16[0];
+		sensorValue = BUFADC[0].i32;
 
 
-		posMINCenter=0;
+		posMINCenter=1;
 		while(f<8){					//ENCUENTRO LA MENOR LECTURA
-			if(sensorValue > valueADCCAL[f].u16[0]){
-				sensorValue=valueADCCAL[f].u16[0];
-				posMINCenter=f;
+			if(sensorValue > BUFADC[f].i32){
+				sensorValue=BUFADC[f].i32;
+				posMINCenter=f+1;
 			}
-			aux[f+1]=valueADCCAL[f].u16[0];
-			f+=1;
+			aux[f+1]=BUFADC[f].i32;
+			f++;
 		}
 		f=0;
-		posMINCenter+=1;
+		//posMINCenter+=1;
 		aux[0]=aux[2];
 		aux[9]=aux[7];
 
-		posMINRight=posMINCenter-1;
-		posMINLeft=posMINCenter+1;
+		posMINRight=posMINCenter+1;
+		posMINLeft=posMINCenter-1;
+
 		fx2_fx3=aux[posMINCenter]-aux[posMINRight];
 		fx2_fx1=aux[posMINCenter]-aux[posMINLeft];
+
 		x2_x1=COORD_SENSORES[posMINCenter]-COORD_SENSORES[posMINLeft];
 		x2_x1cuad=(x2_x1*x2_x1);
 		x2_x3=COORD_SENSORES[posMINCenter]-COORD_SENSORES[posMINRight];
 		x2_x3cuad=(x2_x3*x2_x3);
-		denominador=(2*(x2_x1*fx2_fx3-x2_x3*fx2_fx1));
+
+		numerador=((x2_x1cuad*fx2_fx3) - (x2_x3cuad*fx2_fx1));
+		denominador=(2*((x2_x1*fx2_fx3)-(x2_x3*fx2_fx1)));
+		cuenta=numerador / denominador;
 		if(denominador!=0){
-			xMin=COORD_SENSORES[posMINCenter]-( x2_x1cuad*fx2_fx3 - x2_x3cuad*fx2_fx1 ) / denominador;
+			xMin=COORD_SENSORES[posMINCenter]-cuenta;
+			error.f=xMin;
 		}
-		return -xMin;
+		//return -xMin;
 
 }
 
@@ -950,17 +992,17 @@ void calcPID(uint32_t pwmBase1,uint32_t pwmBase2){
 		}
 
 		derivativo=error.f-lastError;
-		turn= (Kp.u32*error.f) + (Kd.u32*derivativo) + (Ki.u32*integral);
+		turn= (Kp.f*error.f) + (Kd.f*derivativo) + (Ki.f*integral);
 		pwm1=pwmBase1-turn;
 		pwm2=pwmBase2+turn;
 
 
 
-		if(pwm1>200){
-			pwm1=200;
+		if(pwm1>400){
+			pwm1=400;
 		}
-		if(pwm2>200){
-			pwm2=200;
+		if(pwm2>400){
+			pwm2=400;
 		}
 
 		__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_1,0);
@@ -1099,6 +1141,11 @@ int main(void)
 	  	  	udpCom(0);
 	  	  }
 
+	  	  if(calibADC && !CALIBRADO){
+	  		calibrarADC();
+	  		CALIBRADO=1;
+	  	  }
+
 	  	switch(duty){
 	  		case 0:
 	  			if(!timeout1){
@@ -1117,12 +1164,20 @@ int main(void)
 	  	}
 
 	  	if(!timeoutADC){
+
+	  		/*
+	  		if(calibADC){
 	  		  	leerADC();
-	  		  	error.f=findLine();
-	  		  	timeoutADC=2;
+	  		  	calibrarVal();
+	  		  	findLine(valueADCCAL);
+	  		}else{
+	  			findLine(valueADC);
+	  		}*/
+	  		findLine(valueADC);
+	  		timeoutADC=3;
 	  	}
 
-	  	if((race)&&(!timeoutADC)){
+	  	if((race)&&(!timeoutPID)){
 	  		  	calcPID(PWM_motor1.u32,PWM_motor2.u32);
 	  		  	timeoutPID=2;
 	  	}
