@@ -894,7 +894,8 @@ void DecodeComands(uint8_t *buffer,uint8_t indexCMD){
 					__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_4,0);
 					race=1;
 					killRace=1;
-					duty=2;
+					//duty=2;
+					timeoutPID=2;
 					comandoActual=0xD0;
 					//comando=0xD0;
 					readyToSend=1;
@@ -974,7 +975,7 @@ void findLine(_sWork *BUFADC){
 		denominador=(2*((x2_x1*fx2_fx3)-(x2_x3*fx2_fx1)));
 		cuenta=numerador / denominador;
 		if(denominador!=0){
-			xMin=COORD_SENSORES[posMINCenter]-cuenta;
+			xMin=-(COORD_SENSORES[posMINCenter]-cuenta);
 			error.f=xMin;
 		}
 		//return -xMin;
@@ -983,7 +984,7 @@ void findLine(_sWork *BUFADC){
 
 void calcPID(uint32_t pwmBase1,uint32_t pwmBase2){
 
-	float pwm1,pwm2;
+	int32_t pwm1b,pwm2b;
 
 		integral+=error.f;
 
@@ -992,22 +993,23 @@ void calcPID(uint32_t pwmBase1,uint32_t pwmBase2){
 		}
 
 		derivativo=error.f-lastError;
-		turn= (Kp.f*error.f) + (Kd.f*derivativo) + (Ki.f*integral);
-		pwm1=pwmBase1-turn;
-		pwm2=pwmBase2+turn;
+		turn= (Kp.u32 * error.f) + (Kd.u32 * derivativo) + (Ki.u32 * integral);
+
+		pwm1b=pwmBase1 - turn;
+		pwm2b=pwmBase2 + turn;
 
 
 
-		if(pwm1>400){
-			pwm1=400;
+		if(pwm1b>400){
+			pwm1b=400;
 		}
-		if(pwm2>400){
-			pwm2=400;
+		if(pwm2b>400){
+			pwm2b=400;
 		}
 
 		__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_1,0);
-		__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_2,pwm1);
-		__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_3,pwm2);
+		__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_2,pwm1b);
+		__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_3,pwm2b);
 		__HAL_TIM_SET_COMPARE(&htim3,TIM_CHANNEL_4,0);
 		lastError=error.f;
 }
@@ -1165,21 +1167,22 @@ int main(void)
 
 	  	if(!timeoutADC){
 
-	  		/*
+
 	  		if(calibADC){
 	  		  	leerADC();
 	  		  	calibrarVal();
 	  		  	findLine(valueADCCAL);
 	  		}else{
+	  			leerADC();
 	  			findLine(valueADC);
-	  		}*/
-	  		findLine(valueADC);
-	  		timeoutADC=3;
+	  		}
+	  		//findLine(valueADC);
+	  		timeoutADC=2;
 	  	}
 
 	  	if((race)&&(!timeoutPID)){
 	  		  	calcPID(PWM_motor1.u32,PWM_motor2.u32);
-	  		  	timeoutPID=2;
+	  		  	timeoutPID=1;
 	  	}
 
 
